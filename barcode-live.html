@@ -9,6 +9,7 @@
 <meta name="theme-color" content="#111827">
 <title>Barcode Lookup</title>
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root { --bg:#f5f5f4; --card:#fff; --ink:#1c1917; --muted:#78716c; --accent:#2563eb; --line:#e7e5e4; }
   @media (prefers-color-scheme: dark) {
@@ -46,16 +47,15 @@
           border:1px solid var(--line); font-size:14px; cursor:pointer; }
   .sub { font-size:13px; color:var(--muted); }
   .msg { color:var(--muted); font-size:14px; margin:8px 0 0; }
-  .big { font-size:13px; color:var(--muted); }
 </style>
 </head>
 <body>
 <h1>Barcode Lookup</h1>
 
 <div class="card" id="loadCard">
-  <p class="msg" style="margin-top:0">Load your CSV once. It stays on this phone.</p>
-  <label class="btn" for="csvFile">Choose CSV file</label>
-  <input type="file" id="csvFile" accept=".csv,text/csv,text/plain" class="hidden">
+  <p class="msg" style="margin-top:0">Load your file once (CSV or Excel). It stays on this phone.</p>
+  <label class="btn" for="csvFile">Choose CSV or Excel file</label>
+  <input type="file" id="csvFile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden">
   <p class="msg" id="csvStatus">No file loaded.</p>
 </div>
 
@@ -86,24 +86,25 @@
     <select id="barcodeCol"></select>
     <p class="sub" style="margin-top:14px">Columns to show</p>
     <div class="checks" id="showCols"></div>
-    <button class="secondary" id="changeFile" style="margin-top:12px">Load a different CSV</button>
+    <button class="secondary" id="changeFile" style="margin-top:12px">Load a different file</button>
   </div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
-const KEY_CSV = 'bcl-csv', KEY_CFG = 'bcl-cfg';
+const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
 const REPEAT_MS = 3000;           // ignore the same code re-read within this window
 let headers = [], rows = [], barcodeCol = 0, shownCols = [], history = [];
 let reader = null, scanning = false, lastCode = '', lastAt = 0;
 
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
-  set(k,v){ try { localStorage.setItem(k,v); } catch(e){} },
+  set(k,v){ localStorage.setItem(k,v); },   // may throw if too big; callers catch
   del(k){ try { localStorage.removeItem(k); } catch(e){} }
 };
 const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+// ---- Reading files ----
 function parseCSV(text){
   text = text.replace(/^﻿/, '');
   const first = (text.split(/\r?\n/)[0] || '');
@@ -124,33 +125,44 @@ function parseCSV(text){
   return out.filter(r => r.some(x => x.trim() !== ''));
 }
 
-// "012345" and "12345" should match; spaces and dashes are ignored
+// UTF-8 if valid, otherwise Windows-1255 (Hebrew, typical for Excel exports)
+function decodeText(buf){
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) { return new TextDecoder('windows-1255').decode(buf); }
+}
+
+// Returns the sheet as an array of rows (arrays of strings)
+async function readFile(file){
+  const buf = await file.arrayBuffer();
+  if (/\.(xlsx|xls)$/i.test(file.name)) {
+    const wb = XLSX.read(buf, { type: 'array', cellDates: false });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    // raw:false keeps numbers as they appear in the sheet, so long codes are not turned into 1.23E+12
+    return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: false })
+                  .map(r => r.map(v => String(v)));
+  }
+  return parseCSV(decodeText(buf));
+}
+
+// "012345" and "12345" should match; a leading ~ and spaces/dashes are ignored
 const norm = v => {
   const s = String(v).trim().replace(/^~+/, '').replace(/[\s-]/g, '').toUpperCase();
   return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, '') : s;
 };
 
-// Read the file as UTF-8 if it is valid; otherwise assume Windows-1255 (Hebrew, typical for Excel exports)
-async function readCsvFile(file){
-  const buf = await file.arrayBuffer();
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
-  catch (e) { return new TextDecoder('windows-1255').decode(buf); }
-}
-
 let rememberNote = '';
-function loadData(text, remember){
-  const data = parseCSV(text);
-  if (data.length < 2) { $('#csvStatus').innerHTML = '<span class="err">That file has no data rows.</span>'; return; }
-  headers = data[0].map(h => h.trim() || '(blank)');
+function loadData(data, remember){
+  if (!data || data.length < 2) { $('#csvStatus').innerHTML = '<span class="err">That file has no data rows.</span>'; return; }
+  headers = data[0].map(h => String(h).trim() || '(blank)');
   rows = data.slice(1);
   rememberNote = '';
   if (remember) {
-    try { localStorage.setItem(KEY_CSV, text); }
+    try { store.set(KEY_DATA, JSON.stringify(data)); }
     catch (e) { rememberNote = ' Too big to save for next time, so you will need to reload it after closing the app.'; }
   }
 
   const saved = JSON.parse(store.get(KEY_CFG) || 'null');
-  const guess = headers.findIndex(h => /barcode|ean|upc|gtin|sku|code/i.test(h));
+  const guess = headers.findIndex(h => /barcode|ean|upc|gtin|sku|code|ברקוד|מק"?ט/i.test(h));
   barcodeCol = saved && saved.barcodeCol < headers.length ? saved.barcodeCol : (guess >= 0 ? guess : 0);
   shownCols = saved && saved.shownCols ? saved.shownCols.filter(i => i < headers.length && i !== barcodeCol)
                                        : headers.map((_, i) => i).filter(i => i !== barcodeCol);
@@ -194,9 +206,7 @@ async function startCamera(){
     await reader.decodeFromConstraints(
       { video: { facingMode: { ideal: 'environment' } }, audio: false },
       $('#video'),
-      (result, err) => {
-        if (result) onCode(result.getText());
-      }
+      (result, err) => { if (result) onCode(result.getText()); }
     );
   } catch (err) {
     scanning = false;
@@ -270,20 +280,22 @@ $('#history').addEventListener('click', e => {
 $('#lookupBtn').addEventListener('click', () => lookup($('#manual').value));
 $('#manual').addEventListener('keydown', e => { if (e.key === 'Enter') lookup($('#manual').value); });
 
-// ---- CSV handling ----
+// ---- File handling ----
 $('#csvFile').addEventListener('change', async e => {
   const file = e.target.files[0]; e.target.value = '';
-  if (file) loadData(await readCsvFile(file), true);
+  if (!file) return;
+  try { loadData(await readFile(file), true); }
+  catch (err) { $('#csvStatus').innerHTML = '<span class="err">Could not read that file. Try saving it as CSV or XLSX.</span>'; }
 });
 $('#changeFile').addEventListener('click', () => {
   stopCamera();
-  store.del(KEY_CSV); store.del(KEY_CFG);
+  store.del(KEY_DATA); store.del(KEY_CFG);
   $('#app').classList.add('hidden'); $('#loadCard').classList.remove('hidden');
   $('#csvStatus').textContent = 'No file loaded.'; rows = []; history = []; $('#results').innerHTML = '';
 });
 
-const savedCsv = store.get(KEY_CSV);
-if (savedCsv) loadData(savedCsv, false);
+const savedData = store.get(KEY_DATA);
+if (savedData) { try { loadData(JSON.parse(savedData), false); } catch (e) { store.del(KEY_DATA); } }
 </script>
 </body>
 </html>
