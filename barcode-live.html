@@ -41,6 +41,8 @@
   .field:last-child { border-bottom:0; }
   .field span:first-child { color:var(--muted); font-size:14px; }
   .field span:last-child { text-align:right; font-weight:500; word-break:break-word; }
+  .unit-price { background:var(--bg); border-radius:10px; margin:6px -6px; padding:10px 6px; }
+  .unit-price span:last-child { font-weight:700; color:var(--accent); }
   .match { margin-bottom:10px; }
   .checks label { display:flex; gap:10px; align-items:center; padding:8px 0; }
   .chip { display:inline-block; padding:6px 10px; margin:4px 4px 0 0; border-radius:999px; background:var(--bg);
@@ -85,6 +87,8 @@
   <div class="card">
     <p class="sub" style="margin-top:0">Barcode column</p>
     <select id="barcodeCol"></select>
+    <p class="sub" style="margin-top:14px">Price column (used for price per 100 gr/ml)</p>
+    <select id="priceCol"></select>
     <p class="sub" style="margin-top:14px">Columns to show</p>
     <div class="checks" id="showCols"></div>
     <button class="secondary" id="changeFile" style="margin-top:12px">Load a different file</button>
@@ -95,9 +99,9 @@
 const $ = s => document.querySelector(s);
 const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
 const REPEAT_MS = 3000;            // ignore the same code re-read within this window
-const WEIGHT_HEADER = 'תכולה';     // volume/weight column; values get " gr/ml" appended
-const UNIT = ' gr/ml';
-let headers = [], rows = [], barcodeCol = 0, shownCols = [], history = [];
+const WEIGHT_RE = /תכולה/;         // content (weight/volume) column
+const PRICE_RE = /מחיר|price/i;    // price column guess
+let headers = [], rows = [], barcodeCol = 0, priceCol = -1, shownCols = [], history = [];
 let stream = null, scanning = false, rafId = null, lastTick = 0, frameNo = 0;
 let lastCode = '', lastAt = 0, audioCtx = null;
 
@@ -113,6 +117,9 @@ const cleanCode = v => {
   const s = String(v).trim().replace(/^~+/, '').replace(/[\s-]/g, '').toUpperCase();
   return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, '') : s;
 };
+
+// Numbers may use a comma as decimal separator
+const parseNum = v => parseFloat(String(v ?? '').replace(',', '.').replace(/[^\d.\-]/g, ''));
 
 // ---- Reading files ----
 function parseCSV(text){
@@ -165,8 +172,10 @@ function loadData(data, remember){
   }
 
   const saved = JSON.parse(store.get(KEY_CFG) || 'null');
-  const guess = headers.findIndex(h => /barcode|ean|upc|gtin|sku|code|ברקוד|מק"?ט/i.test(h));
-  barcodeCol = saved && saved.barcodeCol < headers.length ? saved.barcodeCol : (guess >= 0 ? guess : 0);
+  const guessBar = headers.findIndex(h => /barcode|ean|upc|gtin|sku|code|ברקוד|מק"?ט/i.test(h));
+  const guessPrice = headers.findIndex(h => PRICE_RE.test(h));
+  barcodeCol = saved && saved.barcodeCol < headers.length ? saved.barcodeCol : (guessBar >= 0 ? guessBar : 0);
+  priceCol = saved && 'priceCol' in saved ? (saved.priceCol < headers.length ? saved.priceCol : -1) : guessPrice;
   shownCols = saved && saved.shownCols ? saved.shownCols.filter(i => i < headers.length && i !== barcodeCol)
                                        : headers.map((_, i) => i).filter(i => i !== barcodeCol);
   buildSettings();
@@ -176,10 +185,12 @@ function loadData(data, remember){
   startCamera();
 }
 
-function saveCfg(){ store.set(KEY_CFG, JSON.stringify({ barcodeCol, shownCols })); }
+function saveCfg(){ store.set(KEY_CFG, JSON.stringify({ barcodeCol, priceCol, shownCols })); }
 
 function buildSettings(){
   $('#barcodeCol').innerHTML = headers.map((h, i) => `<option value="${i}" ${i===barcodeCol?'selected':''}>${esc(h)}</option>`).join('');
+  $('#priceCol').innerHTML = `<option value="-1" ${priceCol<0?'selected':''}>None</option>` +
+    headers.map((h, i) => `<option value="${i}" ${i===priceCol?'selected':''}>${esc(h)}</option>`).join('');
   $('#showCols').innerHTML = headers.map((h, i) => i === barcodeCol ? '' :
     `<label><input type="checkbox" value="${i}" ${shownCols.includes(i)?'checked':''}> ${esc(h)}</label>`).join('');
 }
@@ -187,6 +198,10 @@ $('#barcodeCol').addEventListener('change', e => {
   barcodeCol = +e.target.value;
   shownCols = shownCols.filter(i => i !== barcodeCol);
   buildSettings(); saveCfg();
+});
+$('#priceCol').addEventListener('change', e => {
+  priceCol = +e.target.value;
+  saveCfg();
 });
 $('#showCols').addEventListener('change', e => {
   const i = +e.target.value;
@@ -225,6 +240,7 @@ function setupReader(){
   zreader.setHints(hints);
 }
 
+const video = $('#video');
 const work = $('#work'), wctx = work.getContext('2d', { willReadFrequently: true });
 function decodeFrame(rot){
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -298,7 +314,6 @@ function stopCamera(){
   setStatus('Camera stopped.');
 }
 
-const video = $('#video');
 $('#camBtn').addEventListener('click', () => scanning ? stopCamera() : startCamera());
 
 // Pause the camera when the app goes to the background, resume when it returns
@@ -331,22 +346,41 @@ function lookup(input){
   addHistory(code, matches.length);
 }
 
+// Price per 100 gr/ml = price / content * 100, using the content (תכולה) column
+function pricePer100(r){
+  const wIdx = headers.findIndex(h => WEIGHT_RE.test(h));
+  if (wIdx < 0 || priceCol < 0) return null;
+  const w = parseNum(r[wIdx]), p = parseNum(r[priceCol]);
+  if (!(w > 0) || !(p >= 0) || Number.isNaN(p)) return null;
+  return (p / w * 100).toFixed(2);
+}
+
 function renderResults(code, matches){
   const box = $('#results');
   if (!matches.length) {
     box.innerHTML = `<div class="card"><strong>Not found</strong><p class="msg">No row has ${esc(headers[barcodeCol])} = ${esc(code)}</p></div>`;
     return;
   }
-  box.innerHTML = matches.map((r, k) => `
+  box.innerHTML = matches.map((r, k) => {
+    const unit = pricePer100(r);
+    const unitRow = unit === null ? '' :
+      `<div class="field unit-price"><span>Price per 100 gr/ml</span><span>${esc(unit)}</span></div>`;
+    // Show the unit price right after the price column; if the price isn't among the shown columns, add it at the end
+    const cols = shownCols.slice();
+    if (priceCol >= 0 && !cols.includes(priceCol) && unit !== null) cols.push(priceCol);
+    let html = '';
+    cols.forEach(i => {
+      html += `<div class="field"><span>${esc(headers[i])}</span><span>${esc(String(r[i] ?? '').trim())}</span></div>`;
+      if (i === priceCol) html += unitRow;
+    });
+    if (unit !== null && priceCol < 0) html += unitRow;
+    if (!html) html = '<p class="msg">No columns selected. Pick some in Settings.</p>';
+    return `
     <div class="card match">
       ${matches.length > 1 ? `<div class="sub">Match ${k+1} of ${matches.length}</div>` : ''}
-      ${shownCols.map(i => {
-          let v = String(r[i] ?? '').trim();
-          if (headers[i] === WEIGHT_HEADER && v !== '') v += UNIT;
-          return `<div class="field"><span>${esc(headers[i])}</span><span>${esc(v)}</span></div>`;
-        }).join('')
-        || '<p class="msg">No columns selected. Pick some in Settings.</p>'}
-    </div>`).join('');
+      ${html}
+    </div>`;
+  }).join('');
 }
 
 function addHistory(code, count){
