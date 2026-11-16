@@ -126,16 +126,28 @@ function parseCSV(text){
 
 // "012345" and "12345" should match; spaces and dashes are ignored
 const norm = v => {
-  const s = String(v).trim().replace(/[\s-]/g, '').toUpperCase();
+  const s = String(v).trim().replace(/^~+/, '').replace(/[\s-]/g, '').toUpperCase();
   return /^\d+$/.test(s) ? s.replace(/^0+(?=\d)/, '') : s;
 };
 
+// Read the file as UTF-8 if it is valid; otherwise assume Windows-1255 (Hebrew, typical for Excel exports)
+async function readCsvFile(file){
+  const buf = await file.arrayBuffer();
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) { return new TextDecoder('windows-1255').decode(buf); }
+}
+
+let rememberNote = '';
 function loadData(text, remember){
   const data = parseCSV(text);
   if (data.length < 2) { $('#csvStatus').innerHTML = '<span class="err">That file has no data rows.</span>'; return; }
   headers = data[0].map(h => h.trim() || '(blank)');
   rows = data.slice(1);
-  if (remember) store.set(KEY_CSV, text);
+  rememberNote = '';
+  if (remember) {
+    try { localStorage.setItem(KEY_CSV, text); }
+    catch (e) { rememberNote = ' Too big to save for next time, so you will need to reload it after closing the app.'; }
+  }
 
   const saved = JSON.parse(store.get(KEY_CFG) || 'null');
   const guess = headers.findIndex(h => /barcode|ean|upc|gtin|sku|code/i.test(h));
@@ -143,7 +155,7 @@ function loadData(text, remember){
   shownCols = saved && saved.shownCols ? saved.shownCols.filter(i => i < headers.length && i !== barcodeCol)
                                        : headers.map((_, i) => i).filter(i => i !== barcodeCol);
   buildSettings();
-  $('#csvStatus').textContent = `Loaded ${rows.length} rows, ${headers.length} columns.`;
+  $('#csvStatus').textContent = `Loaded ${rows.length} rows, ${headers.length} columns.` + rememberNote;
   $('#loadCard').classList.add('hidden');
   $('#app').classList.remove('hidden');
   startCamera();
@@ -261,7 +273,7 @@ $('#manual').addEventListener('keydown', e => { if (e.key === 'Enter') lookup($(
 // ---- CSV handling ----
 $('#csvFile').addEventListener('change', async e => {
   const file = e.target.files[0]; e.target.value = '';
-  if (file) loadData(await file.text(), true);
+  if (file) loadData(await readCsvFile(file), true);
 });
 $('#changeFile').addEventListener('click', () => {
   stopCamera();
