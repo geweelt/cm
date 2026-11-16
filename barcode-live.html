@@ -11,9 +11,9 @@
 <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
-  :root { --bg:#f5f5f4; --card:#fff; --ink:#1c1917; --muted:#78716c; --accent:#2563eb; --line:#e7e5e4; }
+  :root { --bg:#f5f5f4; --card:#fff; --ink:#1c1917; --muted:#78716c; --accent:#2563eb; --line:#e7e5e4; --good:#16a34a; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#1c1917; --card:#292524; --ink:#fafaf9; --muted:#a8a29e; --accent:#60a5fa; --line:#44403c; }
+    :root { --bg:#1c1917; --card:#292524; --ink:#fafaf9; --muted:#a8a29e; --accent:#60a5fa; --line:#44403c; --good:#4ade80; }
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -37,18 +37,24 @@
          border-radius:10px; box-shadow:0 0 0 999px rgba(0,0,0,.25); pointer-events:none; }
   .status { font-size:14px; color:var(--muted); margin:10px 0 0; min-height:1.2em; }
   .err { color:#dc2626; }
+  .hero { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px; }
+  .hero div { background:var(--bg); border-radius:12px; padding:12px 10px; text-align:center; }
+  .hero .lbl { font-size:13px; color:var(--muted); }
+  .hero .big { font-size:34px; font-weight:800; line-height:1.15; margin-top:4px; word-break:break-word; }
+  .hero .unit { color:var(--good); }
+  .title { font-size:18px; font-weight:600; margin:0 0 8px; word-break:break-word; }
   .field { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
   .field:last-child { border-bottom:0; }
   .field span:first-child { color:var(--muted); font-size:14px; }
   .field span:last-child { text-align:right; font-weight:500; word-break:break-word; }
-  .unit-price { background:var(--bg); border-radius:10px; margin:6px -6px; padding:10px 6px; }
-  .unit-price span:last-child { font-weight:700; color:var(--accent); }
-  .match { margin-bottom:10px; }
+  .match { margin-bottom:10px; transition: box-shadow .2s; }
   .checks label { display:flex; gap:10px; align-items:center; padding:8px 0; }
   .chip { display:inline-block; padding:6px 10px; margin:4px 4px 0 0; border-radius:999px; background:var(--bg);
           border:1px solid var(--line); font-size:14px; cursor:pointer; }
   .sub { font-size:13px; color:var(--muted); }
   .msg { color:var(--muted); font-size:14px; margin:8px 0 0; }
+  /* hidden switch used to trigger a haptic tap on iPhone */
+  #hapSw { position:absolute; left:-9999px; }
 </style>
 </head>
 <body>
@@ -95,6 +101,9 @@
   </div>
 </div>
 
+<input type="checkbox" id="hapSw" switch tabindex="-1" aria-hidden="true">
+<label for="hapSw" id="hapLbl" class="hidden"></label>
+
 <script>
 const $ = s => document.querySelector(s);
 const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
@@ -103,7 +112,7 @@ const WEIGHT_RE = /תכולה/;         // content (weight/volume) column
 const PRICE_RE = /מחיר|price/i;    // price column guess
 let headers = [], rows = [], barcodeCol = 0, priceCol = -1, shownCols = [], history = [];
 let stream = null, scanning = false, rafId = null, lastTick = 0, frameNo = 0;
-let lastCode = '', lastAt = 0, audioCtx = null;
+let lastCode = '', lastAt = 0, audioCtx = null, beepEl = null;
 
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
@@ -209,15 +218,43 @@ $('#showCols').addEventListener('change', e => {
   saveCfg();
 });
 
-// ---- Beep (Web Audio; created on the first tap because iPhone requires a user gesture) ----
-function unlockAudio(){
+// ---- Feedback on each new read: sound, haptic tap, and a green flash ----
+// Sound: iPhone web pages cannot play through the silent switch. The beep plays only when the phone is not muted.
+function makeBeepUrl(){
+  const rate = 22050, secs = 0.15, n = Math.floor(rate * secs);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); wr(8, 'WAVE'); wr(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  wr(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const env = Math.max(0, 1 - i / n);
+    const s = Math.sin(2 * Math.PI * 1800 * i / rate) * env * 0.6;
+    v.setInt16(44 + i * 2, s * 32767, true);
+  }
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+function unlockFeedback(){
   try {
+    if (!beepEl) { beepEl = new Audio(makeBeepUrl()); beepEl.preload = 'auto'; }
+    // Playing once inside a tap unlocks later plays
+    beepEl.play().then(() => { beepEl.pause(); beepEl.currentTime = 0; }).catch(() => {});
     audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
   } catch (e) {}
 }
-document.addEventListener('pointerdown', unlockAudio);
+document.addEventListener('pointerdown', unlockFeedback);
+
 function beep(){
+  if (beepEl) {
+    beepEl.currentTime = 0;
+    const p = beepEl.play();
+    if (p && p.catch) p.catch(() => webBeep());
+  } else webBeep();
+}
+function webBeep(){
   if (!audioCtx || audioCtx.state !== 'running') return;
   const t = audioCtx.currentTime;
   const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
@@ -226,6 +263,18 @@ function beep(){
   gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
   osc.connect(gain); gain.connect(audioCtx.destination);
   osc.start(t); osc.stop(t + 0.13);
+}
+
+function haptic(){
+  // Toggling a switch control gives a light tap on recent iPhones, even in silent mode (best effort)
+  try { $('#hapLbl').click(); } catch (e) {}
+}
+
+function flash(){
+  const el = document.querySelector('#results .match');
+  if (el && el.animate) el.animate([
+    { boxShadow: '0 0 0 6px #22c55e' }, { boxShadow: '0 0 0 0 rgba(34,197,94,0)' }
+  ], { duration: 700 });
 }
 
 // ---- Live scanning: decode frames with ZXing, trying the image at 0/90/270 degrees ----
@@ -264,7 +313,7 @@ function decodeFrame(rot){
 
 async function startCamera(){
   if (scanning) return;
-  unlockAudio();
+  unlockFeedback();
   if (!window.ZXing) { setStatus('Scanner library did not load. Type codes below.', true); $('#camBtn').textContent = 'Camera unavailable'; return; }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     setStatus('This browser cannot open the camera. Type codes below.', true); return;
@@ -332,9 +381,11 @@ function onCode(text){
   if (code === lastCode && now - lastAt < REPEAT_MS) return;   // same code still in view
   lastCode = code; lastAt = now;
   beep();
+  haptic();
   setStatus('Read: ' + code);
   $('#manual').value = code;
   lookup(code);
+  flash();
 }
 
 // ---- Lookup ----
@@ -351,7 +402,7 @@ function pricePer100(r){
   const wIdx = headers.findIndex(h => WEIGHT_RE.test(h));
   if (wIdx < 0 || priceCol < 0) return null;
   const w = parseNum(r[wIdx]), p = parseNum(r[priceCol]);
-  if (!(w > 0) || !(p >= 0) || Number.isNaN(p)) return null;
+  if (!(w > 0) || Number.isNaN(p) || p < 0) return null;
   return (p / w * 100).toFixed(2);
 }
 
@@ -362,23 +413,24 @@ function renderResults(code, matches){
     return;
   }
   box.innerHTML = matches.map((r, k) => {
+    // Big summary at the top: price and price per 100 gr/ml
     const unit = pricePer100(r);
-    const unitRow = unit === null ? '' :
-      `<div class="field unit-price"><span>Price per 100 gr/ml</span><span>${esc(unit)}</span></div>`;
-    // Show the unit price right after the price column; if the price isn't among the shown columns, add it at the end
-    const cols = shownCols.slice();
-    if (priceCol >= 0 && !cols.includes(priceCol) && unit !== null) cols.push(priceCol);
-    let html = '';
-    cols.forEach(i => {
-      html += `<div class="field"><span>${esc(headers[i])}</span><span>${esc(String(r[i] ?? '').trim())}</span></div>`;
-      if (i === priceCol) html += unitRow;
-    });
-    if (unit !== null && priceCol < 0) html += unitRow;
-    if (!html) html = '<p class="msg">No columns selected. Pick some in Settings.</p>';
+    const priceRaw = priceCol >= 0 ? String(r[priceCol] ?? '').trim() : '';
+    let hero = '';
+    if (priceCol >= 0) {
+      hero = `<div class="hero">
+        <div><div class="lbl">${esc(headers[priceCol])}</div><div class="big">${esc(priceRaw || '—')}</div></div>
+        <div><div class="lbl">Per 100 gr/ml</div><div class="big unit">${unit !== null ? esc(unit) : '—'}</div></div>
+      </div>`;
+    }
+    // Detail rows: every shown column except the price (already in the summary)
+    const details = shownCols.filter(i => i !== priceCol).map(i =>
+      `<div class="field"><span>${esc(headers[i])}</span><span>${esc(String(r[i] ?? '').trim())}</span></div>`).join('');
     return `
     <div class="card match">
       ${matches.length > 1 ? `<div class="sub">Match ${k+1} of ${matches.length}</div>` : ''}
-      ${html}
+      ${hero}
+      ${details || (hero ? '' : '<p class="msg">No columns selected. Pick some in Settings.</p>')}
     </div>`;
   }).join('');
 }
