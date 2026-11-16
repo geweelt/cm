@@ -24,7 +24,7 @@
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
   button, .btn { font:inherit; font-weight:600; border:0; border-radius:12px; padding:14px; width:100%;
                  background:var(--accent); color:#fff; text-align:center; display:block; cursor:pointer; }
-  button.secondary { background:transparent; color:var(--accent); border:1px solid var(--line); }
+  button.secondary, .btn.secondary { background:transparent; color:var(--accent); border:1px solid var(--line); }
   input[type=text], select { font:inherit; width:100%; padding:12px; border-radius:10px; border:1px solid var(--line);
                              background:var(--bg); color:var(--ink); }
   .row { display:flex; gap:8px; }
@@ -42,7 +42,6 @@
   .hero .lbl { font-size:13px; color:var(--muted); }
   .hero .big { font-size:34px; font-weight:800; line-height:1.15; margin-top:4px; word-break:break-word; }
   .hero .unit { color:var(--good); }
-  .title { font-size:18px; font-weight:600; margin:0 0 8px; word-break:break-word; }
   .field { display:flex; justify-content:space-between; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); }
   .field:last-child { border-bottom:0; }
   .field span:first-child { color:var(--muted); font-size:14px; }
@@ -53,6 +52,7 @@
           border:1px solid var(--line); font-size:14px; cursor:pointer; }
   .sub { font-size:13px; color:var(--muted); }
   .msg { color:var(--muted); font-size:14px; margin:8px 0 0; }
+  .stack > * + * { margin-top:10px; }
   /* hidden switch used to trigger a haptic tap on iPhone */
   #hapSw { position:absolute; left:-9999px; }
 </style>
@@ -61,10 +61,14 @@
 <h1>Barcode Lookup</h1>
 
 <div class="card" id="loadCard">
-  <p class="msg" style="margin-top:0">Load your file once (CSV or Excel). It stays on this phone.</p>
-  <label class="btn" for="csvFile">Choose CSV or Excel file</label>
-  <input type="file" id="csvFile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden">
-  <p class="msg" id="csvStatus">No file loaded.</p>
+  <div class="stack">
+    <p class="msg" style="margin-top:0">Load the price file once. Choose the server copy, or a file from this phone.</p>
+    <button id="serverBtn">Load ProfitAge1.xlsx from server</button>
+    <p class="sub" style="text-align:center;margin:0">or</p>
+    <label class="btn secondary" for="csvFile">Choose CSV or Excel file on this phone</label>
+    <input type="file" id="csvFile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden">
+    <p class="msg" id="csvStatus">No file loaded.</p>
+  </div>
 </div>
 
 <div id="app" class="hidden">
@@ -76,6 +80,7 @@
     <canvas id="work" class="hidden"></canvas>
     <div class="row" style="margin-top:12px">
       <button id="camBtn" class="secondary" style="flex:1">Stop camera</button>
+      <button id="soundBtn" class="secondary">🔊 Sound on</button>
     </div>
     <p class="status" id="scanStatus">Starting camera…</p>
     <div class="row" style="margin-top:10px">
@@ -90,14 +95,22 @@
   <div class="card" id="history"><p class="msg">Nothing yet.</p></div>
 
   <h2>Settings</h2>
-  <div class="card">
-    <p class="sub" style="margin-top:0">Barcode column</p>
-    <select id="barcodeCol"></select>
-    <p class="sub" style="margin-top:14px">Price column (used for price per 100 gr/ml)</p>
-    <select id="priceCol"></select>
-    <p class="sub" style="margin-top:14px">Columns to show</p>
-    <div class="checks" id="showCols"></div>
-    <button class="secondary" id="changeFile" style="margin-top:12px">Load a different file</button>
+  <div class="card stack">
+    <p class="sub" id="srcInfo" style="margin-top:0"></p>
+    <button class="secondary" id="reloadBtn">Reload ProfitAge1.xlsx from server</button>
+    <div>
+      <p class="sub">Barcode column</p>
+      <select id="barcodeCol"></select>
+    </div>
+    <div>
+      <p class="sub">Price column (used for price per 100 gr/ml)</p>
+      <select id="priceCol"></select>
+    </div>
+    <div>
+      <p class="sub">Columns to show</p>
+      <div class="checks" id="showCols"></div>
+    </div>
+    <button class="secondary" id="changeFile">Forget loaded file and start over</button>
   </div>
 </div>
 
@@ -106,13 +119,19 @@
 
 <script>
 const $ = s => document.querySelector(s);
+const SERVER_FILE = 'ProfitAge1.xlsx';   // must sit next to this page
 const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
 const REPEAT_MS = 3000;            // ignore the same code re-read within this window
 const WEIGHT_RE = /תכולה/;         // content (weight/volume) column
 const PRICE_RE = /מחיר|price/i;    // price column guess
+const ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];   // fallback rotations, used when no clear barcode direction is found
+
+const savedCfg = JSON.parse(localStorage.getItem(KEY_CFG) || 'null') || {};
 let headers = [], rows = [], barcodeCol = 0, priceCol = -1, shownCols = [], history = [];
+let soundOn = savedCfg.sound !== false;
 let stream = null, scanning = false, rafId = null, lastTick = 0, frameNo = 0;
 let lastCode = '', lastAt = 0, audioCtx = null, beepEl = null;
+let rememberNote = '';
 
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
@@ -129,6 +148,9 @@ const cleanCode = v => {
 
 // Numbers may use a comma as decimal separator
 const parseNum = v => parseFloat(String(v ?? '').replace(',', '.').replace(/[^\d.\-]/g, ''));
+
+const fmtDate = d => (d instanceof Date && !isNaN(d))
+  ? d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : null;
 
 // ---- Reading files ----
 function parseCSV(text){
@@ -157,27 +179,35 @@ function decodeText(buf){
   catch (e) { return new TextDecoder('windows-1255').decode(buf); }
 }
 
-async function readFile(file){
-  const buf = await file.arrayBuffer();
-  if (/\.(xlsx|xls)$/i.test(file.name)) {
+// Returns { data: rows of strings, updated: Date|null } from an xlsx/xls/csv buffer
+function parseSpreadsheet(buf, name){
+  if (/\.(xlsx|xls)$/i.test(name)) {
     const wb = XLSX.read(buf, { type: 'array' });
     const ws = wb.Sheets[wb.SheetNames[0]];
     // raw:false keeps numbers as displayed, so long codes don't become 1.23E+12
-    return XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: false })
-                  .map(r => r.map(v => String(v)));
+    const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false, blankrows: false })
+                       .map(r => r.map(v => String(v)));
+    const mod = wb.Props && wb.Props.ModifiedDate ? new Date(wb.Props.ModifiedDate) : null;
+    return { data, updated: mod };
   }
-  return parseCSV(decodeText(buf));
+  return { data: parseCSV(decodeText(buf)), updated: null };
 }
 
-let rememberNote = '';
-function loadData(data, remember){
-  if (!data || data.length < 2) { $('#csvStatus').innerHTML = '<span class="err">That file has no data rows.</span>'; return; }
+function setLoadMsg(text, isErr){
+  const html = isErr ? `<span class="err">${esc(text)}</span>` : esc(text);
+  $('#csvStatus').innerHTML = html;
+  $('#srcInfo').innerHTML = html;
+}
+
+// info: { source: 'server' | 'phone', updated: string | null }
+function loadData(data, info, remember){
+  if (!data || data.length < 2) { setLoadMsg('That file has no data rows.', true); return; }
   headers = data[0].map(h => String(h).trim() || '(blank)');
   rows = data.slice(1);
   rememberNote = '';
   if (remember) {
-    try { store.set(KEY_DATA, JSON.stringify(data)); }
-    catch (e) { rememberNote = ' Too big to save for next time, so you will need to reload it after closing the app.'; }
+    try { store.set(KEY_DATA, JSON.stringify({ data, info })); }
+    catch (e) { rememberNote = ' Too big to save for next time; load it again after closing the app.'; }
   }
 
   const saved = JSON.parse(store.get(KEY_CFG) || 'null');
@@ -188,13 +218,16 @@ function loadData(data, remember){
   shownCols = saved && saved.shownCols ? saved.shownCols.filter(i => i < headers.length && i !== barcodeCol)
                                        : headers.map((_, i) => i).filter(i => i !== barcodeCol);
   buildSettings();
-  $('#csvStatus').textContent = `Loaded ${rows.length} rows, ${headers.length} columns.` + rememberNote;
+
+  const where = info.source === 'server' ? 'From server' : 'From this phone';
+  const upd = info.updated ? ` · Last updated: ${info.updated}` : '';
+  setLoadMsg(`${where}: ${rows.length} rows, ${headers.length} columns${upd}.${rememberNote}`, false);
   $('#loadCard').classList.add('hidden');
   $('#app').classList.remove('hidden');
   startCamera();
 }
 
-function saveCfg(){ store.set(KEY_CFG, JSON.stringify({ barcodeCol, priceCol, shownCols })); }
+function saveCfg(){ store.set(KEY_CFG, JSON.stringify({ barcodeCol, priceCol, shownCols, sound: soundOn })); }
 
 function buildSettings(){
   $('#barcodeCol').innerHTML = headers.map((h, i) => `<option value="${i}" ${i===barcodeCol?'selected':''}>${esc(h)}</option>`).join('');
@@ -218,10 +251,38 @@ $('#showCols').addEventListener('change', e => {
   saveCfg();
 });
 
-// ---- Feedback on each new read: sound, haptic tap, and a green flash ----
+// ---- Loading the price file ----
+async function loadFromServer(fromSettings){
+  if (!fromSettings) setLoadMsg('Loading from server…', false);
+  else $('#srcInfo').textContent = 'Loading from server…';
+  try {
+    const res = await fetch(SERVER_FILE, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const { data, updated } = parseSpreadsheet(await res.arrayBuffer(), SERVER_FILE);
+    // Use the date saved inside the file; fall back to the server's Last-Modified header
+    const hdr = res.headers.get('Last-Modified');
+    const when = updated || (hdr ? new Date(hdr) : null);
+    loadData(data, { source: 'server', updated: fmtDate(when) }, false);
+  } catch (err) {
+    setLoadMsg(`Could not load ${SERVER_FILE} from the server. Check that it sits next to this page, or choose a file from this phone.`, true);
+  }
+}
+$('#serverBtn').addEventListener('click', () => { unlockFeedback(); loadFromServer(false); });
+$('#reloadBtn').addEventListener('click', () => { unlockFeedback(); loadFromServer(true); });
+
+$('#csvFile').addEventListener('change', async e => {
+  const file = e.target.files[0]; e.target.value = '';
+  if (!file) return;
+  try {
+    const { data, updated } = parseSpreadsheet(await file.arrayBuffer(), file.name);
+    loadData(data, { source: 'phone', updated: fmtDate(updated) }, true);
+  } catch (err) { setLoadMsg('Could not read that file. Try saving it as CSV or XLSX.', true); }
+});
+
+// ---- Sound and feedback ----
 // Sound: iPhone web pages cannot play through the silent switch. The beep plays only when the phone is not muted.
 function makeBeepUrl(){
-  const rate = 22050, secs = 0.15, n = Math.floor(rate * secs);
+  const rate = 22050, secs = 0.08, n = Math.floor(rate * secs), freq = 900;
   const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
   const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
   wr(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); wr(8, 'WAVE'); wr(12, 'fmt ');
@@ -230,7 +291,7 @@ function makeBeepUrl(){
   wr(36, 'data'); v.setUint32(40, n * 2, true);
   for (let i = 0; i < n; i++) {
     const env = Math.max(0, 1 - i / n);
-    const s = Math.sin(2 * Math.PI * 1800 * i / rate) * env * 0.6;
+    const s = Math.sin(2 * Math.PI * freq * i / rate) * env * 0.6;
     v.setInt16(44 + i * 2, s * 32767, true);
   }
   return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
@@ -248,6 +309,7 @@ function unlockFeedback(){
 document.addEventListener('pointerdown', unlockFeedback);
 
 function beep(){
+  if (!soundOn) return;
   if (beepEl) {
     beepEl.currentTime = 0;
     const p = beepEl.play();
@@ -258,12 +320,22 @@ function webBeep(){
   if (!audioCtx || audioCtx.state !== 'running') return;
   const t = audioCtx.currentTime;
   const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
-  osc.type = 'sine'; osc.frequency.value = 1800;
+  osc.type = 'sine'; osc.frequency.value = 900;
   gain.gain.setValueAtTime(0.3, t);
-  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
   osc.connect(gain); gain.connect(audioCtx.destination);
-  osc.start(t); osc.stop(t + 0.13);
+  osc.start(t); osc.stop(t + 0.09);
 }
+
+function updateSoundBtn(){
+  $('#soundBtn').textContent = soundOn ? '🔊 Sound on' : '🔇 Sound off';
+}
+$('#soundBtn').addEventListener('click', () => {
+  soundOn = !soundOn;
+  updateSoundBtn(); saveCfg();
+  if (soundOn) { unlockFeedback(); beep(); }
+});
+updateSoundBtn();
 
 function haptic(){
   // Toggling a switch control gives a light tap on recent iPhones, even in silent mode (best effort)
@@ -277,7 +349,7 @@ function flash(){
   ], { duration: 700 });
 }
 
-// ---- Live scanning: decode frames with ZXing, trying the image at 0/90/270 degrees ----
+// ---- Live scanning: decode frames with ZXing, trying the image at several angles ----
 const hints = new Map();
 let zreader = null;
 function setupReader(){
@@ -291,15 +363,17 @@ function setupReader(){
 
 const video = $('#video');
 const work = $('#work'), wctx = work.getContext('2d', { willReadFrequently: true });
-function decodeFrame(rot){
+// The work canvas is a square big enough to hold the video at any rotation
+function decodeFrame(angle){
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
-  const swap = rot === 90 || rot === 270;
-  const cw = swap ? vh : vw, ch = swap ? vw : vh;
-  if (work.width !== cw || work.height !== ch) { work.width = cw; work.height = ch; }
+  const S = Math.ceil(Math.hypot(vw, vh));
+  if (work.width !== S) { work.width = S; work.height = S; }
+  wctx.fillStyle = '#000';
+  wctx.fillRect(0, 0, S, S);
   wctx.save();
-  wctx.translate(cw / 2, ch / 2);
-  wctx.rotate(rot * Math.PI / 180);
+  wctx.translate(S / 2, S / 2);
+  wctx.rotate(angle * Math.PI / 180);
   wctx.drawImage(video, -vw / 2, -vh / 2, vw, vh);
   wctx.restore();
   try {
@@ -307,7 +381,7 @@ function decodeFrame(rot){
     const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src));
     return zreader.decode(bitmap).getText();
   } catch (e) {
-    return null;   // nothing readable in this frame
+    return null;   // nothing readable at this angle
   }
 }
 
@@ -339,13 +413,44 @@ async function startCamera(){
   }
 }
 
+// Finds the dominant edge direction in a small grayscale copy of the frame (structure tensor).
+// Barcode bars give a strong, consistent direction; the decoder needs its scan lines across the bars.
+const small = document.createElement('canvas');
+const sctx = small.getContext('2d', { willReadFrequently: true });
+function detectOrientation(){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return { angle: 0, coherence: 0 };
+  const w = 320, h = Math.round(320 * vh / vw);
+  if (small.width !== w || small.height !== h) { small.width = w; small.height = h; }
+  sctx.drawImage(video, 0, 0, w, h);
+  const d = sctx.getImageData(0, 0, w, h).data;
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = 0.299 * d[4*i] + 0.587 * d[4*i+1] + 0.114 * d[4*i+2];
+  let Jxx = 0, Jyy = 0, Jxy = 0;
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const gx = g[i+1] - g[i-1], gy = g[i+w] - g[i-w];
+      Jxx += gx * gx; Jyy += gy * gy; Jxy += gx * gy;
+    }
+  }
+  const dominant = 0.5 * Math.atan2(2 * Jxy, Jxx - Jyy);      // direction of the strongest edges
+  const total = Jxx + Jyy;
+  const coherence = total > 0 ? Math.hypot(Jxx - Jyy, 2 * Jxy) / total : 0;
+  // Rotate so the strongest edges are vertical, i.e. the scan lines run across the bars
+  return { angle: -dominant * 180 / Math.PI, coherence };
+}
+
 function loop(now){
   if (!scanning) return;
   rafId = requestAnimationFrame(loop);
-  if (now - lastTick < 90 || video.readyState < 2) return;   // about 10 checks per second
+  if (now - lastTick < 100 || video.readyState < 2) return;   // about 10 checks per second
   lastTick = now;
-  const rot = [0, 90, 0, 270][frameNo++ % 4];
-  const text = decodeFrame(rot);
+  const det = detectOrientation();
+  // Clear direction found: try that angle and two close neighbours. Otherwise try every fallback angle in turn.
+  const angles = det.coherence > 0.2 ? [det.angle, det.angle + 12, det.angle - 12] : ANGLES;
+  const angle = angles[frameNo++ % angles.length];
+  const text = decodeFrame(angle);
   if (text) onCode(text);
 }
 
@@ -446,22 +551,24 @@ $('#history').addEventListener('click', e => {
 $('#lookupBtn').addEventListener('click', () => lookup($('#manual').value));
 $('#manual').addEventListener('keydown', e => { if (e.key === 'Enter') lookup($('#manual').value); });
 
-// ---- File handling ----
-$('#csvFile').addEventListener('change', async e => {
-  const file = e.target.files[0]; e.target.value = '';
-  if (!file) return;
-  try { loadData(await readFile(file), true); }
-  catch (err) { $('#csvStatus').innerHTML = '<span class="err">Could not read that file. Try saving it as CSV or XLSX.</span>'; }
-});
 $('#changeFile').addEventListener('click', () => {
   stopCamera();
   store.del(KEY_DATA); store.del(KEY_CFG);
   $('#app').classList.add('hidden'); $('#loadCard').classList.remove('hidden');
-  $('#csvStatus').textContent = 'No file loaded.'; rows = []; history = []; $('#results').innerHTML = '';
+  setLoadMsg('No file loaded.', false);
+  rows = []; history = []; $('#results').innerHTML = '';
 });
 
-const savedData = store.get(KEY_DATA);
-if (savedData) { try { loadData(JSON.parse(savedData), false); } catch (e) { store.del(KEY_DATA); } }
+// On open: restore the last phone file if one was saved; otherwise wait for the user to tap a load button
+const storedRaw = store.get(KEY_DATA);
+if (storedRaw) {
+  try {
+    const stored = JSON.parse(storedRaw);
+    // Older saves were a bare array of rows
+    if (Array.isArray(stored)) loadData(stored, { source: 'phone', updated: null }, false);
+    else loadData(stored.data, stored.info || { source: 'phone', updated: null }, false);
+  } catch (e) { store.del(KEY_DATA); }
+}
 </script>
 </body>
 </html>
