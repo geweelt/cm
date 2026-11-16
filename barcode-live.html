@@ -19,18 +19,15 @@
   html, body { height: 100%; }
   body { margin:0; font:16px -apple-system, system-ui, sans-serif; background:var(--bg); color:var(--ink);
          padding: calc(env(safe-area-inset-top) + 12px) 14px calc(env(safe-area-inset-bottom) + 20px); overflow-x:hidden; }
-  .head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin:4px 0 2px; }
-  h1 { font-size:22px; margin:0; }
+  h1 { font-size:22px; margin:4px 0 12px; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:20px 0 8px; }
   .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin-bottom:12px; }
   button, .btn { font:inherit; font-weight:600; border:0; border-radius:12px; padding:14px; width:100%;
                  background:var(--accent); color:#fff; text-align:center; display:block; cursor:pointer; }
   button.secondary, .btn.secondary { background:transparent; color:var(--accent); border:1px solid var(--line); }
-  button.small { width:auto; padding:8px 12px; font-size:14px; }
   input[type=text], select { font:inherit; width:100%; padding:12px; border-radius:10px; border:1px solid var(--line);
                              background:var(--bg); color:var(--ink); }
   .row { display:flex; gap:8px; }
-  .row > * { flex:1; min-width:0; }
   .row input { flex:1; min-width:0; }
   .row button { width:auto; padding:12px 16px; }
   .hidden { display:none !important; }
@@ -61,27 +58,20 @@
 </style>
 </head>
 <body>
+<h1>Barcode Lookup</h1>
 
-<div id="loadCard">
-  <div class="head"><h1>Barcode Lookup</h1></div>
-  <div class="card stack" style="margin-top:12px">
-    <p class="sub" id="serverInfo" style="margin-top:0">Checking the server copy…</p>
-    <div class="row">
-      <button id="serverBtn">Load from server</button>
-      <label class="btn secondary" for="csvFile">Pick file from phone</label>
-    </div>
-    <button class="secondary" id="replaceBtn2">Update stock file from phone</button>
+<div class="card" id="loadCard">
+  <div class="stack">
+    <p class="msg" style="margin-top:0">Load the price file once. Choose the server copy, or a file from this phone.</p>
+    <button id="serverBtn">Load ProfitAge1.xlsx from server</button>
+    <p class="sub" style="text-align:center;margin:0">or</p>
+    <label class="btn secondary" for="csvFile">Choose CSV or Excel file on this phone</label>
+    <input type="file" id="csvFile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden">
     <p class="msg" id="csvStatus">No file loaded.</p>
   </div>
 </div>
 
 <div id="app" class="hidden">
-  <div class="head">
-    <h1>Barcode Lookup</h1>
-    <button class="secondary small" id="replaceBtn">Update stock file</button>
-  </div>
-  <p class="sub" id="topInfo" style="margin:4px 0 12px"></p>
-
   <div class="card">
     <div class="video-wrap">
       <video id="video" muted playsinline autoplay></video>
@@ -89,7 +79,7 @@
     </div>
     <canvas id="work" class="hidden"></canvas>
     <div class="row" style="margin-top:12px">
-      <button id="camBtn" class="secondary">Stop camera</button>
+      <button id="camBtn" class="secondary" style="flex:1">Stop camera</button>
       <button id="soundBtn" class="secondary">🔊 Sound on</button>
     </div>
     <p class="status" id="scanStatus">Starting camera…</p>
@@ -106,7 +96,8 @@
 
   <h2>Settings</h2>
   <div class="card stack">
-    <button class="secondary" id="reloadBtn">Reload file from server</button>
+    <p class="sub" id="srcInfo" style="margin-top:0"></p>
+    <button class="secondary" id="reloadBtn">Reload ProfitAge1.xlsx from server</button>
     <div>
       <p class="sub">Barcode column</p>
       <select id="barcodeCol"></select>
@@ -123,13 +114,12 @@
   </div>
 </div>
 
-<input type="file" id="csvFile" accept=".csv,.xlsx,.xls,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" class="hidden">
 <input type="checkbox" id="hapSw" switch tabindex="-1" aria-hidden="true">
 <label for="hapSw" id="hapLbl" class="hidden"></label>
 
 <script>
 const $ = s => document.querySelector(s);
-const SERVER_FILE = 'prices.xlsx';   // must sit next to this page
+const SERVER_FILE = 'ProfitAge1.xlsx';   // must sit next to this page
 const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
 const REPEAT_MS = 3000;            // ignore the same code re-read within this window
 const WEIGHT_RE = /תכולה/;         // content (weight/volume) column
@@ -142,7 +132,6 @@ let soundOn = savedCfg.sound !== false;
 let stream = null, scanning = false, rafId = null, lastTick = 0, frameNo = 0;
 let lastCode = '', lastAt = 0, audioCtx = null, beepEl = null;
 let rememberNote = '';
-let serverPromise = null;          // cached download of the server file
 
 const store = {
   get(k){ try { return localStorage.getItem(k); } catch(e){ return null; } },
@@ -204,14 +193,13 @@ function parseSpreadsheet(buf, name){
   return { data: parseCSV(decodeText(buf)), updated: null };
 }
 
-// Shows a message on the load screen and in the top line of the main screen
 function setLoadMsg(text, isErr){
   const html = isErr ? `<span class="err">${esc(text)}</span>` : esc(text);
   $('#csvStatus').innerHTML = html;
-  $('#topInfo').innerHTML = html;
+  $('#srcInfo').innerHTML = html;
 }
 
-// info: { source: 'server' | 'phone', updated: string | null, name }
+// info: { source: 'server' | 'phone', updated: string | null }
 function loadData(data, info, remember){
   if (!data || data.length < 2) { setLoadMsg('That file has no data rows.', true); return; }
   headers = data[0].map(h => String(h).trim() || '(blank)');
@@ -231,8 +219,8 @@ function loadData(data, info, remember){
                                        : headers.map((_, i) => i).filter(i => i !== barcodeCol);
   buildSettings();
 
-  const where = info.source === 'server' ? `Server file ${SERVER_FILE}` : (info.name || 'File from this phone');
-  const upd = info.updated ? ` · last updated ${info.updated}` : '';
+  const where = info.source === 'server' ? 'From server' : 'From this phone';
+  const upd = info.updated ? ` · Last updated: ${info.updated}` : '';
   setLoadMsg(`${where}: ${rows.length} rows, ${headers.length} columns${upd}.${rememberNote}`, false);
   $('#loadCard').classList.add('hidden');
   $('#app').classList.remove('hidden');
@@ -263,53 +251,31 @@ $('#showCols').addEventListener('change', e => {
   saveCfg();
 });
 
-// ---- Server file: downloaded once when the page opens, reused when the user taps Load ----
-function fetchServer(){
-  if (!serverPromise) {
-    serverPromise = (async () => {
-      const res = await fetch(SERVER_FILE, { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const { data, updated } = parseSpreadsheet(await res.arrayBuffer(), SERVER_FILE);
-      // Use the date saved inside the file; fall back to the server's Last-Modified header
-      const hdr = res.headers.get('Last-Modified');
-      const when = updated || (hdr ? new Date(hdr) : null);
-      return { data, updated: fmtDate(when) };
-    })().catch(err => { serverPromise = null; throw err; });   // allow a retry after a failure
-  }
-  return serverPromise;
-}
-
-function showServerInfo(){
-  fetchServer()
-    .then(s => { $('#serverInfo').textContent = `Server file ${SERVER_FILE}: last updated ${s.updated || 'date unknown'}`; })
-    .catch(() => { $('#serverInfo').textContent = `No ${SERVER_FILE} found on the server.`; });
-}
-
-async function loadFromServer(){
-  setLoadMsg('Loading from server…', false);
+// ---- Loading the price file ----
+async function loadFromServer(fromSettings){
+  if (!fromSettings) setLoadMsg('Loading from server…', false);
+  else $('#srcInfo').textContent = 'Loading from server…';
   try {
-    const s = await fetchServer();
-    loadData(s.data, { source: 'server', updated: s.updated }, false);
+    const res = await fetch(SERVER_FILE, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const { data, updated } = parseSpreadsheet(await res.arrayBuffer(), SERVER_FILE);
+    // Use the date saved inside the file; fall back to the server's Last-Modified header
+    const hdr = res.headers.get('Last-Modified');
+    const when = updated || (hdr ? new Date(hdr) : null);
+    loadData(data, { source: 'server', updated: fmtDate(when) }, false);
   } catch (err) {
-    setLoadMsg(`Could not load ${SERVER_FILE} from the server. Check that it sits next to this page, or pick a file from this phone.`, true);
+    setLoadMsg(`Could not load ${SERVER_FILE} from the server. Check that it sits next to this page, or choose a file from this phone.`, true);
   }
 }
-
-$('#serverBtn').addEventListener('click', () => { unlockFeedback(); loadFromServer(); });
-$('#reloadBtn').addEventListener('click', () => {
-  unlockFeedback();
-  serverPromise = null;          // force a fresh download
-  loadFromServer().then(showServerInfo);
-});
-// "Replace file": pick a new file from the phone and use it from now on
-['#replaceBtn', '#replaceBtn2'].forEach(s => $(s).addEventListener('click', () => { unlockFeedback(); $('#csvFile').click(); }));
+$('#serverBtn').addEventListener('click', () => { unlockFeedback(); loadFromServer(false); });
+$('#reloadBtn').addEventListener('click', () => { unlockFeedback(); loadFromServer(true); });
 
 $('#csvFile').addEventListener('change', async e => {
   const file = e.target.files[0]; e.target.value = '';
   if (!file) return;
   try {
     const { data, updated } = parseSpreadsheet(await file.arrayBuffer(), file.name);
-    loadData(data, { source: 'phone', updated: fmtDate(updated), name: file.name }, true);
+    loadData(data, { source: 'phone', updated: fmtDate(updated) }, true);
   } catch (err) { setLoadMsg('Could not read that file. Try saving it as CSV or XLSX.', true); }
 });
 
@@ -593,9 +559,7 @@ $('#changeFile').addEventListener('click', () => {
   rows = []; history = []; $('#results').innerHTML = '';
 });
 
-// On open: check the server copy and show its date on the load screen.
-// If a phone file was saved earlier, restore it; otherwise wait for the user to tap a load button.
-showServerInfo();
+// On open: restore the last phone file if one was saved; otherwise wait for the user to tap a load button
 const storedRaw = store.get(KEY_DATA);
 if (storedRaw) {
   try {
