@@ -72,6 +72,7 @@
 </div>
 
 <div id="app" class="hidden">
+  <p class="sub" id="topInfo" style="margin:0 2px 10px"></p>
   <div class="card">
     <div class="video-wrap">
       <video id="video" muted playsinline autoplay></video>
@@ -193,9 +194,11 @@ function parseSpreadsheet(buf, name){
   return { data: parseCSV(decodeText(buf)), updated: null };
 }
 
+// Shows a message on the load screen, in the top line of the main screen, and in Settings
 function setLoadMsg(text, isErr){
   const html = isErr ? `<span class="err">${esc(text)}</span>` : esc(text);
   $('#csvStatus').innerHTML = html;
+  $('#topInfo').innerHTML = html;
   $('#srcInfo').innerHTML = html;
 }
 
