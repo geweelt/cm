@@ -53,14 +53,6 @@
   .sub { font-size:13px; color:var(--muted); }
   .msg { color:var(--muted); font-size:14px; margin:8px 0 0; }
   .stack > * + * { margin-top:10px; }
-  /* product info from products.xlsx */
-  .prod { margin-bottom:12px; }
-  .pname { font-size:20px; font-weight:700; margin:6px 0 4px; word-break:break-word; }
-  .pimg { display:block; width:100%; max-height:240px; object-fit:contain; border-radius:12px; background:var(--bg); margin-top:8px; }
-  .psec { margin-top:12px; }
-  .ptext { white-space:pre-line; font-size:15px; line-height:1.4; word-break:break-word; margin-top:2px; }
-  .lang { display:inline-block; padding:1px 8px; margin-right:6px; border-radius:999px; background:var(--bg);
-          border:1px solid var(--line); font-size:12px; font-weight:600; color:var(--ink); }
   /* hidden switch used to trigger a haptic tap on iPhone */
   #hapSw { position:absolute; left:-9999px; }
 </style>
@@ -107,8 +99,6 @@
   <div class="card stack">
     <p class="sub" id="srcInfo" style="margin-top:0"></p>
     <button class="secondary" id="reloadBtn">Reload ProfitAge1.xlsx from server</button>
-    <p class="sub" id="prodInfo"></p>
-    <button class="secondary" id="prodReloadBtn">Reload products.xlsx from server</button>
     <div>
       <p class="sub">Barcode column</p>
       <select id="barcodeCol"></select>
@@ -116,15 +106,6 @@
     <div>
       <p class="sub">Price column (used for price per 100 gr/ml)</p>
       <select id="priceCol"></select>
-    </div>
-    <div>
-      <p class="sub">Product language (products.xlsx)</p>
-      <select id="prodLang">
-        <option value="all">All languages</option>
-        <option value="he">Hebrew (he)</option>
-        <option value="en">English (en)</option>
-        <option value="ru">Russian (ru)</option>
-      </select>
     </div>
     <div>
       <p class="sub">Columns to show</p>
@@ -140,8 +121,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const SERVER_FILE = 'ProfitAge1.xlsx';   // must sit next to this page
-const PRODUCTS_FILE = 'products.xlsx';   // must sit next to this page
-const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg', KEY_PROD = 'bcl-products';
+const KEY_DATA = 'bcl-data', KEY_CFG = 'bcl-cfg';
 const REPEAT_MS = 3000;            // ignore the same code re-read within this window
 const WEIGHT_RE = /תכולה/;         // content (weight/volume) column
 const PRICE_RE = /מחיר|price/i;    // price column guess
@@ -149,7 +129,6 @@ const ANGLES = [0, 45, 90, 135, 180, 225, 270, 315];   // fallback rotations, us
 
 const savedCfg = JSON.parse(localStorage.getItem(KEY_CFG) || 'null') || {};
 let headers = [], rows = [], barcodeCol = 0, priceCol = -1, shownCols = [], history = [];
-let products = [], productLang = savedCfg.prodLang || 'all', shownCode = '';
 let soundOn = savedCfg.sound !== false;
 let stream = null, scanning = false, rafId = null, lastTick = 0, frameNo = 0;
 let lastCode = '', lastAt = 0, audioCtx = null, beepEl = null;
@@ -223,11 +202,6 @@ function setLoadMsg(text, isErr){
   $('#srcInfo').innerHTML = html;
 }
 
-// Status line for products.xlsx (Settings only)
-function setProdInfo(text, isErr){
-  $('#prodInfo').innerHTML = isErr ? `<span class="err">${esc(text)}</span>` : esc(text);
-}
-
 // info: { source: 'server' | 'phone', updated: string | null }
 function loadData(data, info, remember){
   if (!data || data.length < 2) { setLoadMsg('That file has no data rows.', true); return; }
@@ -256,9 +230,7 @@ function loadData(data, info, remember){
   startCamera();
 }
 
-function saveCfg(){
-  store.set(KEY_CFG, JSON.stringify({ barcodeCol, priceCol, shownCols, sound: soundOn, prodLang: productLang }));
-}
+function saveCfg(){ store.set(KEY_CFG, JSON.stringify({ barcodeCol, priceCol, shownCols, sound: soundOn })); }
 
 function buildSettings(){
   $('#barcodeCol').innerHTML = headers.map((h, i) => `<option value="${i}" ${i===barcodeCol?'selected':''}>${esc(h)}</option>`).join('');
@@ -280,11 +252,6 @@ $('#showCols').addEventListener('change', e => {
   const i = +e.target.value;
   shownCols = e.target.checked ? [...new Set([...shownCols, i])] : shownCols.filter(x => x !== i);
   saveCfg();
-});
-$('#prodLang').addEventListener('change', e => {
-  productLang = e.target.value;
-  saveCfg();
-  if (shownCode) renderAll(shownCode);
 });
 
 // ---- Loading the price file ----
@@ -314,61 +281,6 @@ $('#csvFile').addEventListener('change', async e => {
     loadData(data, { source: 'phone', updated: fmtDate(updated) }, true);
   } catch (err) { setLoadMsg('Could not read that file. Try saving it as CSV or XLSX.', true); }
 });
-
-// ---- Loading products.xlsx (product info shown next to the price) ----
-// Expected columns: Name, GTIN, Language, Description, Nutrition facts, Image
-// Image may be a web address (https://...) or an image data address (data:image/...).
-function buildProducts(data){
-  if (!data || data.length < 2) return { list: [], error: `${PRODUCTS_FILE} has no data rows.` };
-  const h = data[0].map(x => String(x).trim().toLowerCase());
-  const want = ['name', 'gtin', 'language', 'description', 'nutrition facts', 'image'];
-  const missing = want.filter(w => !h.includes(w));
-  if (missing.length) return { list: [], error: `${PRODUCTS_FILE} is missing column: ${missing.join(', ')}.` };
-  const list = data.slice(1).map(r => {
-    const get = w => String(r[h.indexOf(w)] ?? '').trim();
-    return {
-      code: cleanCode(get('gtin')),
-      name: get('name'),
-      lang: get('language').toLowerCase(),
-      desc: get('description'),
-      nutr: get('nutrition facts'),
-      img: get('image')
-    };
-  }).filter(p => p.code);
-  return { list, error: null };
-}
-
-async function loadProducts(){
-  setProdInfo('Loading products.xlsx…');
-  let data = null, fromServer = false;
-  try {
-    const res = await fetch(PRODUCTS_FILE, { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    data = parseSpreadsheet(await res.arrayBuffer(), PRODUCTS_FILE).data;
-    fromServer = true;
-  } catch (err) {
-    // Server not reachable: fall back to the copy saved on this phone, if any
-    try { data = JSON.parse(store.get(KEY_PROD) || 'null'); } catch (e) { data = null; }
-    if (!data) {
-      products = [];
-      setProdInfo(`Could not load ${PRODUCTS_FILE} from the server. Product info is off until it loads.`, true);
-      if (shownCode) renderAll(shownCode);
-      return;
-    }
-  }
-  const { list, error } = buildProducts(data);
-  if (error) {
-    products = [];
-    setProdInfo(error, true);
-  } else {
-    products = list;
-    if (fromServer) { try { store.set(KEY_PROD, JSON.stringify(data)); } catch (e) {} }
-    const barcodes = new Set(list.map(p => p.code)).size;
-    setProdInfo(`${list.length} product entries for ${barcodes} barcodes${fromServer ? '' : ' (saved copy; server not reachable)'}.`);
-  }
-  if (shownCode) renderAll(shownCode);
-}
-$('#prodReloadBtn').addEventListener('click', () => { unlockFeedback(); loadProducts(); });
 
 // ---- Sound and feedback ----
 // Sound: iPhone web pages cannot play through the silent switch. The beep plays only when the phone is not muted.
@@ -434,7 +346,7 @@ function haptic(){
 }
 
 function flash(){
-  const el = document.querySelector('#results .match, #results .prod');
+  const el = document.querySelector('#results .match');
   if (el && el.animate) el.animate([
     { boxShadow: '0 0 0 6px #22c55e' }, { boxShadow: '0 0 0 0 rgba(34,197,94,0)' }
   ], { duration: 700 });
@@ -585,21 +497,12 @@ function onCode(text){
 }
 
 // ---- Lookup ----
-// A code is looked up in the price file (rows) and in products.xlsx (GTIN column).
 function lookup(input){
   const code = cleanCode(input || '');
   if (!code) return;
-  shownCode = code;
-  const found = renderAll(code);
-  addHistory(code, found);
-}
-
-// Finds matches in both files and redraws the results. Returns the number of matches.
-function renderAll(code){
   const matches = rows.filter(r => cleanCode(r[barcodeCol] ?? '') === code);
-  const prods = products.filter(p => p.code === code && (productLang === 'all' || p.lang === productLang));
-  renderResults(code, matches, prods);
-  return matches.length + prods.length;
+  renderResults(code, matches);
+  addHistory(code, matches.length);
 }
 
 // Price per 100 gr/ml = price / content * 100, using the content (תכולה) column
@@ -611,36 +514,13 @@ function pricePer100(r){
   return (p / w * 100).toFixed(2);
 }
 
-// Only web addresses and inline images are shown; anything else is ignored
-function safeImg(u){
-  return /^(https?:\/\/|data:image\/)/i.test(u) ? u : '';
-}
-
-function productCard(p){
-  const img = safeImg(p.img);
-  const sec = (label, text) => text
-    ? `<div class="psec"><div class="sub">${label}</div><div class="ptext" dir="auto">${esc(text)}</div></div>` : '';
-  return `
-  <div class="card prod">
-    <div class="sub"><span class="lang">${esc(p.lang ? p.lang.toUpperCase() : '?')}</span>${esc(p.code)}</div>
-    <div class="pname" dir="auto">${esc(p.name || '—')}</div>
-    ${img ? `<img class="pimg" src="${esc(img)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}
-    ${sec('Description', p.desc)}
-    ${sec('Nutrition facts', p.nutr)}
-  </div>`;
-}
-
-function renderResults(code, matches, prods){
+function renderResults(code, matches){
   const box = $('#results');
-  if (!matches.length && !prods.length) {
-    box.innerHTML = `<div class="card"><strong>Not found</strong><p class="msg">No row has ${esc(headers[barcodeCol] || 'barcode')} = ${esc(code)}</p></div>`;
+  if (!matches.length) {
+    box.innerHTML = `<div class="card"><strong>Not found</strong><p class="msg">No row has ${esc(headers[barcodeCol])} = ${esc(code)}</p></div>`;
     return;
   }
-  let html = '';
-  if (!matches.length) {
-    html += `<div class="card"><p class="msg">Not in the price file (${esc(code)}).</p></div>`;
-  }
-  html += matches.map((r, k) => {
+  box.innerHTML = matches.map((r, k) => {
     // Big summary at the top: price and price per 100 gr/ml
     const unit = pricePer100(r);
     const priceRaw = priceCol >= 0 ? String(r[priceCol] ?? '').trim() : '';
@@ -661,10 +541,6 @@ function renderResults(code, matches, prods){
       ${details || (hero ? '' : '<p class="msg">No columns selected. Pick some in Settings.</p>')}
     </div>`;
   }).join('');
-  if (prods.length) {
-    html += `<h2>Product info</h2>` + prods.map(productCard).join('');
-  }
-  box.innerHTML = html;
 }
 
 function addHistory(code, count){
@@ -683,7 +559,7 @@ $('#changeFile').addEventListener('click', () => {
   store.del(KEY_DATA); store.del(KEY_CFG);
   $('#app').classList.add('hidden'); $('#loadCard').classList.remove('hidden');
   setLoadMsg('No file loaded.', false);
-  rows = []; history = []; shownCode = ''; $('#results').innerHTML = '';
+  rows = []; history = []; $('#results').innerHTML = '';
 });
 
 // On open: restore the last phone file if one was saved; otherwise wait for the user to tap a load button
@@ -696,10 +572,6 @@ if (storedRaw) {
     else loadData(stored.data, stored.info || { source: 'phone', updated: null }, false);
   } catch (e) { store.del(KEY_DATA); }
 }
-
-// Products are independent of the price file: load them right away
-$('#prodLang').value = productLang;
-loadProducts();
 </script>
 </body>
 </html>
